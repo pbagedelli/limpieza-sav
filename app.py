@@ -149,7 +149,7 @@ Te proporcionaré una lista de NOMBRES DE VARIABLE (cortos, para SPSS) junto con
 Tu tarea es, para CADA nombre de variable, generar una ETIQUETA DE VARIABLE descriptiva y clara para SPSS.
 
 Consideraciones para las ETIQUETAS DE VARIABLE:
-1.  Deben ser cortas, descriptivas y explicar lo que la variable representa.
+1.  Deben ser cortas y descriptivas.
 2.  Deben estar en el mismo idioma que la pregunta original.
 3.  Si la pregunta original es muy larga, resúmela sin perder el significado esencial.
 4.  La longitud máxima de una etiqueta de variable en SPSS es 256 caracteres. Intenta no superarla.
@@ -165,6 +165,8 @@ Ejemplos:
   Etiqueta de Variable: "Likelihood of Voting in Current Canadian Federal Election"
 - Nombre de Variable: "EducationLevel", Pregunta Original: "What is your highest level of education completed?"
   Etiqueta de Variable: "Education Level"
+- Nombre de Variable: "edad", Pregunta Original: "Cual es tu edad?"
+  Etiqueta de Variable: "Edad"
 - Nombre de Variable: "ImagenDinaBoluarte", Pregunta Original: "Imagen de Diana Boluarte"
   Etiqueta de Variable: "Imagen Diana Boluarte"
 - Nombre de Variable: "ImagenPresidente", Pregunta Original: "imagen_presidente"
