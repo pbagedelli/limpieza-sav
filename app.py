@@ -153,6 +153,7 @@ Consideraciones para las ETIQUETAS DE VARIABLE:
 2.  Deben estar en el mismo idioma que la pregunta original.
 3.  Si la pregunta original es muy larga, resúmela sin perder el significado esencial.
 4.  La longitud máxima de una etiqueta de variable en SPSS es 256 caracteres. Intenta no superarla.
+5.  Mantiene el mismo idioma que el original.
 
 
 Devuelve tu respuesta ÚNICAMENTE como un objeto JSON que mapee cada NOMBRE DE VARIABLE (el corto que te di) a su nueva ETIQUETA DE VARIABLE (la descriptiva).
