@@ -673,4 +673,3 @@ else:
         st.info("Sube un archivo CSV o Excel para empezar.")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("Creado con Streamlit, OpenAI y Pyreadstat.")
