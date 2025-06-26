@@ -175,8 +175,8 @@ Lista de nombres de variable y sus descripciones originales:
 
 Formato JSON de salida esperado:
 {{
-  "NombreVariable1": "Etiqueta Descriptiva Larga para Variable 1",
-  "NombreVariable2": "Etiqueta Descriptiva Larga para Variable 2",
+  "NombreVariable1": "Etiqueta Descriptiva para Variable 1",
+  "NombreVariable2": "Etiqueta Descriptiva para Variable 2",
   ...
 }}
 """
