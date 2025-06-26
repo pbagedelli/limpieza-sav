@@ -9,7 +9,7 @@ import pyreadstat # Para guardar archivos .sav
 import tempfile 
 
 # --- Configuración de la Página de Streamlit ---
-st.set_page_config(layout="wide", page_title="Procesador de Datos para SPSS", initial_sidebar_state="auto")
+st.set_page_config(layout="wide", page_title="Procesador de Datos para SPSS", initial_sidebar_state="expanded")
 
 st.title("Procesador de Datos de Encuestas con IA para SPSS (.sav)")
 st.markdown("""
