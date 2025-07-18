@@ -17,18 +17,17 @@ st.markdown("""
 Sube un archivo CSV o Excel, elige las operaciones y descarga los resultados en formato `.sav`.
 - **Simplificar Nombres de Columnas**: Usa un LLM para acortar los nombres largos de las columnas (serán los nombres de variable en SPSS).
 - **Generar Etiquetas de Variables**: Usa un LLM para crear etiquetas descriptivas para cada variable (serán las etiquetas de variable en SPSS).
-- **Codificar Variables Categóricas**: Identifica columnas **NO NUMÉRICAS** y las codifica.
-    - **Ordinales**: Convierte escalas (ej. Likert) a números ordenados.
-    - **Con Categorías de Escape**: Asigna números secuenciales a las opciones principales y números altos (ej. 98, 99) a opciones como "Otro", "No sabe", "Ninguna de las anteriores", etc.
+- **Codificar Variables Ordinales**: Identifica columnas **NO NUMÉRICAS** con categorías ordinales (ej. escalas Likert) y las convierte a números, usando los textos originales como etiquetas de valor en SPSS.
 - **Manejo de Missing para Strings**: Las variables de texto tendrán 'nan' (como string) definido como valor perdido en SPSS.
 """)
 
 # --- Constantes ---
-MAX_CATEGORIAS_PARA_LLM = 15 # Aumentado ligeramente para dar más flexibilidad
-SPSS_VAR_NAME_MAX_LEN = 64
+MAX_CATEGORIAS_PARA_LLM = 10 # Para la codificación ordinal
+SPSS_VAR_NAME_MAX_LEN = 64 # Límite de longitud para nombres de variable en SPSS
+# MODELO_LLM = "gpt-4-turbo-preview" # Modelo por defecto anterior
 MODELO_LLM_PRINCIPAL = "gpt-4.1-mini" # Modelo especificado por el usuario
 
-# --- Función de Sanitización ---
+# --- NUEVA FUNCIÓN DE SANITIZACIÓN ---
 def sanitize_spss_varname(name_str):
     name_str = str(name_str)
     name_str = re.sub(r'[.:\-/]', '_', name_str) 
@@ -41,8 +40,7 @@ def sanitize_spss_varname(name_str):
         return "UnnamedVar"
     return name_str
 
-# --- Funciones LLM ---
-
+# --- Funciones LLM (Originales y Nuevas) ---
 def simplify_survey_column_names_llm(column_names_list, client, model=MODELO_LLM_PRINCIPAL):
     if not client:
         st.error("Error: El cliente de OpenAI no está inicializado.")
@@ -109,6 +107,7 @@ Formato JSON de salida esperado:
             return None
         validated_response = {}
         for original, simplified in parsed_response.items():
+            # Usar sanitize_spss_varname para una limpieza más robusta
             validated_response[original] = sanitize_spss_varname(simplified)
         
         missing_keys = [name for name in column_names_list if name not in validated_response]
@@ -202,72 +201,54 @@ Formato JSON de salida esperado:
         if not isinstance(parsed_response, dict):
             st.error(f"Error: La respuesta del LLM para etiquetas de variable no es un diccionario: {parsed_response}")
             return None
-        final_labels = {key: str(value)[:256] for key, value in parsed_response.items()}
+        final_labels = {key: str(value)[:256] for key, value in parsed_response.items()} # Truncar a 256
         missing_keys = [name for name in column_name_map_for_prompt.keys() if name not in final_labels]
         if missing_keys:
             st.warning(f"Advertencia: El LLM no devolvió etiquetas para las siguientes variables: {missing_keys}")
             for key in missing_keys:
-                final_labels[key] = str(column_name_map_for_prompt.get(key, key))[:256]
+                final_labels[key] = str(column_name_map_for_prompt.get(key, key))[:256] # Usar la original o la clave como fallback
         return final_labels
     except json.JSONDecodeError as e:
         st.error(f"Error al decodificar JSON de la respuesta del LLM (etiquetas de variable): {e}")
         st.text_area("Respuesta recibida del LLM (etiquetas de variable):", llm_response_json, height=150)
         return None
 
-# --- NUEVA FUNCIÓN DE CODIFICACIÓN CATEGÓRICA ---
-def get_llm_categorical_encoding_suggestion(categories_list, client, model=MODELO_LLM_PRINCIPAL):
+def get_llm_mapping_suggestion(categories_list, client, model=MODELO_LLM_PRINCIPAL): # Cambio de modelo aquí
     if not client:
-        st.error("Error: El cliente de OpenAI no está inicializado.")
+        st.error("Error: El cliente de OpenAI no está inicializado. No se puede hacer la llamada API para codificación.")
         return None
-    
     categories_list_string = json.dumps(categories_list)
     prompt = f"""
-Eres un asistente experto en preparar datos de encuestas para análisis estadístico en SPSS.
-Te proporcionaré una lista de categorías únicas de una columna de una encuesta. Tu tarea es analizar estas categorías y decidir si necesitan una codificación numérica especial.
+Eres un asistente experto en análisis de datos y encuestas, preparando datos para SPSS.
+Te proporcionaré una lista de Python que contiene las categorías únicas (ya ordenadas alfabéticamente/numéricamente si es posible) de una columna de una encuesta.
+Tu tarea es:
+1. Determinar si estas categorías representan una escala ordinal significativa.
+2. Si es ordinal, crea un diccionario de Python que mapee cada categoría de texto a un valor numérico entero. El mapeo debe respetar el orden lógico de la escala. Los valores numéricos deben ser enteros y preferiblemente comenzar desde 1 (el valor más positivo de la escala).
+3. Si es ordinal pero tiene alguna categoría que no se puede ordenar o representa un "no sabe/no contesta" (ej. "No sé", "Prefiero no responder", "N/A", "nan"), mapea las categorías ordenables y asigna un valor numérico alto (ej. 99, 98) a estas categorías no ordenables/missing. Estos se usarán luego como valores perdidos definidos por el usuario en SPSS. Si no hay tales categorías, no incluyas valores altos.
+4. Devuelve tu respuesta ÚNICAMENTE como un objeto JSON con la estructura:
+   {{
+     "is_ordinal": true_or_false,
+     "mapping_dict": {{ "categoria_texto_1": numero_1, "categoria_texto_2": numero_2, "No sé": 99, ... }}
+   }}
+   Si `is_ordinal` es false, `mapping_dict` debe ser `null`.
+Usa las categorías de texto exactas proporcionadas como claves en `mapping_dict`. Asegúrate que los valores en el diccionario sean NUMÉRICOS, no strings.
 
-Hay dos casos en los que se necesita codificación:
+Ejemplos de mapeo:
+- ["Totalmente en desacuerdo", "En desacuerdo", "Neutral", "De acuerdo", "Totalmente de acuerdo"] -> {{"is_ordinal": true, "mapping_dict": {{"Totalmente de acuerdo": 1, "De acuerdo": 2, "Neutral": 3, "En desacuerdo": 4, "Totalmente en desacuerdo": 5}}}}
+- ["Muy Malo", "Malo", "Regular", "Bueno", "Excelente", "No aplica"] -> {{"is_ordinal": true, "mapping_dict": {{"Excelente": 1, "Bueno": 2, "Regular": 3, "Malo": 4, "Muy Malo": 5, "No aplica": 99}}}}
+- ["Bajo", "Medio", "Alto"] -> {{"is_ordinal": true, "mapping_dict": {{"Alto": 1, "Medio": 2, "Bajo": 3}}}}
+- ["Sí", "No", "Quizás"] -> {{"is_ordinal": true, "mapping_dict": {{"Sí": 1, "Quizás": 2, "No": 3}}}} (orden lógico, no alfabético) o bien {{"Sí": 1, "No": 0, "Quizás": 2}} si es más intuitivo para sí/no. Sé consistente.
+- ["Manzana", "Banana", "Cereza"] -> {{"is_ordinal": false, "mapping_dict": null}} (nominal)
+- ["1", "2", "3", "4", "5", "nan"] -> {{"is_ordinal": true, "mapping_dict": {{"1":1, "2":2, "3":3, "4":4, "5":5, "nan":99}}}} (si el contexto sugiere ordinalidad y 'nan' es un missing)
 
-CASO 1: La variable es **ORDINAL**.
-Las categorías tienen un orden lógico inherente (ej. escalas de satisfacción, nivel de acuerdo, frecuencia).
-- Mapea las categorías a números enteros secuenciales que respeten el orden. Generalmente, 1 es el valor más positivo o alto de la escala.
-
-CASO 2: La variable es **NOMINAL PERO TIENE CATEGORÍAS DE 'ESCAPE'**.
-Las categorías principales no tienen un orden, pero hay opciones especiales como "No sé", "Prefiero no responder", "Otro", "Ninguna de las anteriores", "N/A", "nan", etc.
-- Mapea las categorías "normales" a números enteros secuenciales (empezando en 1).
-- Mapea las categorías de "escape" a valores numéricos altos y distintos (ej. 97, 98, 99) para que puedan ser definidas como valores perdidos en SPSS.
-
-Si la variable es simplemente nominal sin categorías de escape (ej. ["Manzana", "Naranja", "Pera"]), entonces NO necesita codificación.
-
-Devuelve tu respuesta ÚNICAMENTE como un objeto JSON con esta estructura:
-{{
-  "needs_encoding": true_or_false,
-  "mapping_dict": {{ "categoria_1": numero_1, ... }}
-}}
-
-- "needs_encoding": será `true` si es el CASO 1 o CASO 2. Será `false` si es una variable nominal simple.
-- "mapping_dict": El diccionario de mapeo si `needs_encoding` es `true`, o `null` si es `false`.
-- IMPORTANTE: Los valores en `mapping_dict` deben ser NÚMEROS enteros, no strings.
-
-Ejemplos de respuesta:
-- Input: ["Totalmente en desacuerdo", "En desacuerdo", "De acuerdo", "Totalmente de acuerdo"]
-  Output: {{"needs_encoding": true, "mapping_dict": {{"Totalmente de acuerdo": 1, "De acuerdo": 2, "En desacuerdo": 3, "Totalmente en desacuerdo": 4}}}}
-- Input: ["Malo", "Regular", "Bueno", "No aplica"]
-  Output: {{"needs_encoding": true, "mapping_dict": {{"Bueno": 1, "Regular": 2, "Malo": 3, "No aplica": 99}}}}
-- Input: ["Candidato A", "Candidato B", "Otro", "No sabe/No contesta"]
-  Output: {{"needs_encoding": true, "mapping_dict": {{"Candidato A": 1, "Candidato B": 2, "Otro": 98, "No sabe/No contesta": 99}}}}
-- Input: ["Rojo", "Verde", "Azul"]
-  Output: {{"needs_encoding": false, "mapping_dict": null}}
-- Input: ["1", "2", "3", "4", "5", "nan"]
-  Output: {{"needs_encoding": true, "mapping_dict": {{"1":1, "2":2, "3":3, "4":4, "5":5, "nan":99}}}}
-
-Lista de categorías a analizar:
+Lista de categorías:
 {categories_list_string}
 """
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Eres un experto en codificación de datos de encuestas para SPSS. Analizas listas de categorías y devuelves un JSON estructurado para el mapeo numérico. Los valores del mapeo deben ser números enteros."},
+                {"role": "system", "content": "Eres un asistente experto en análisis de datos y encuestas, especializado en devolver respuestas en formato JSON para escalas ordinales. Asegúrate que los valores del mapping_dict sean números, no strings."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"}
@@ -278,27 +259,22 @@ Lista de categorías a analizar:
         return None
     try:
         parsed_response = json.loads(llm_response_json)
-        # Validación robusta de la respuesta
-        if not isinstance(parsed_response, dict) or "needs_encoding" not in parsed_response:
-             st.error(f"Respuesta de LLM para codificación no tiene el formato esperado: {parsed_response}")
-             return None
-
-        if parsed_response.get("needs_encoding") and isinstance(parsed_response.get("mapping_dict"), dict):
+        # Validar que los valores del mapping_dict sean numéricos si existe
+        if parsed_response and isinstance(parsed_response.get("mapping_dict"), dict):
             for k, v in parsed_response["mapping_dict"].items():
                 if not isinstance(v, (int, float)):
-                    st.warning(f"LLM devolvió un valor no numérico ('{v}') para la categoría '{k}'. Intentando convertir a int.")
+                    st.warning(f"LLM devolvió un valor no numérico ('{v}') para la categoría '{k}' en el mapeo. Intentando convertir a int o marcando como error si falla.")
                     try:
                         parsed_response["mapping_dict"][k] = int(v)
-                    except (ValueError, TypeError):
+                    except ValueError:
                         st.error(f"No se pudo convertir '{v}' a int para la categoría '{k}'. Este mapeo podría ser inválido.")
-                        # Invalidar la sugerencia si hay un error de conversión grave
-                        return {"needs_encoding": False, "mapping_dict": None}
+                        # Podríamos eliminar esta entrada o invalidar todo el mapeo
+                        # Por ahora, se deja para que el usuario lo vea y la lógica posterior lo maneje
         return parsed_response
     except json.JSONDecodeError as e:
         st.error(f"Error al decodificar JSON de la respuesta del LLM (codificación): {e}")
         st.text_area("Respuesta recibida del LLM (codificación):", llm_response_json, height=150)
         return None
-
 
 # --- Interfaz de Streamlit ---
 st.sidebar.header("🔑 Configuración de OpenAI")
@@ -320,14 +296,12 @@ uploaded_file = st.sidebar.file_uploader("Sube tu archivo CSV o Excel", type=["c
 st.sidebar.header("⚙️ Opciones de Procesamiento")
 do_simplify_cols = st.sidebar.checkbox("Simplificar nombres de columnas (Nombres de Variable SPSS)", value=False)
 do_generate_var_labels = st.sidebar.checkbox("Generar etiquetas de variables (Etiquetas de Variable SPSS)", value=True)
-# --- MODIFICADO --- Texto de la opción de codificación para ser más claro
-do_encode_categorical = st.sidebar.checkbox("Codificar variables categóricas (Ordinales y de Escape)", value=True)
+do_encode_ordinal = st.sidebar.checkbox("Codificar variables ordinales (con Etiquetas de Valor SPSS)", value=True)
 
-encoding_mode = "Crear nuevas columnas (ej. VarName_num)"
-if do_encode_categorical:
-    # --- MODIFICADO --- Título del radio para reflejar la nueva funcionalidad
-    encoding_mode = st.sidebar.radio(
-        "Modo de codificación categórica:",
+ordinal_encoding_mode = "Crear nuevas columnas (ej. VarName_num)"
+if do_encode_ordinal:
+    ordinal_encoding_mode = st.sidebar.radio(
+        "Modo de codificación ordinal:",
         ("Crear nuevas columnas (ej. VarName_num)", "Reemplazar valores en columnas existentes"),
         index=0,
         help="Elige si las columnas codificadas reemplazan a las originales o se crean como nuevas."
@@ -337,13 +311,14 @@ if 'df_processed' not in st.session_state: st.session_state.df_processed = None
 if 'spss_variable_labels' not in st.session_state: st.session_state.spss_variable_labels = {}
 if 'spss_value_labels' not in st.session_state: st.session_state.spss_value_labels = {}
 if 'spss_missing_ranges' not in st.session_state: st.session_state.spss_missing_ranges = {}
-if 'codificaciones_cache' not in st.session_state: st.session_state.codificaciones_cache = {}
+if 'codificaciones_ordinales_cache' not in st.session_state: st.session_state.codificaciones_ordinales_cache = {}
 if 'log_messages' not in st.session_state: st.session_state.log_messages = []
 
 
 if uploaded_file is not None:
     st.subheader("Vista Previa del Archivo Original")
     try:
+        # MODIFICACIÓN 1: Cargar sin dtype=str para preservar tipos originales
         if uploaded_file.name.endswith('.csv'):
             df_original = pd.read_csv(uploaded_file)
         else:
@@ -353,15 +328,14 @@ if uploaded_file is not None:
         if st.sidebar.button("🚀 Procesar Datos para .sav"):
             with st.spinner("Procesando datos... Por favor espera."):
                 df_processed = df_original.copy()
-                st.session_state.log_messages = []
+                st.session_state.log_messages = [] # Resetear logs
                 
                 spss_variable_labels_dict = {} 
                 spss_value_labels_dict = {}  
                 original_to_simplified_map_for_labels = {col: col for col in df_processed.columns}
 
-                # 1. Simplificar Nombres de Columnas
+                # 1. Simplificar Nombres de Columnas (Nombres de Variable SPSS) - Opcional
                 if do_simplify_cols:
-                    # ... (Esta sección no necesita cambios, se deja como está)
                     st.session_state.log_messages.append("--- Iniciando Simplificación de Nombres de Columnas ---")
                     if openai_client:
                         original_column_names_list = df_processed.columns.tolist()
@@ -416,11 +390,9 @@ if uploaded_file is not None:
                         df_processed.rename(columns=unique_fb_map, inplace=True)
                         original_to_simplified_map_for_labels = {orig: unique_fb_map.get(orig, orig) for orig in df_original.columns}
                     st.session_state.log_messages.append("--- Fin de Simplificación de Nombres ---")
+                
 
-
-                # 2. Generar Etiquetas de Variable
                 if do_generate_var_labels:
-                    # ... (Esta sección no necesita cambios, se deja como está)
                     st.session_state.log_messages.append("\n--- Iniciando Generación de Etiquetas de Variable ---")
                     if openai_client:
                         map_current_name_to_original_question = {}
@@ -444,6 +416,7 @@ if uploaded_file is not None:
                             spss_variable_labels_dict = {col: str(map_current_name_to_original_question.get(col, col))[:256] for col in df_processed.columns} 
                     else: 
                         st.session_state.log_messages.append("Cliente OpenAI no configurado para etiquetas de variable. Usando pregunta original/nombre de columna como fallback.")
+                        # Construir map_current_name_to_original_question incluso si no hay cliente, para que las etiquetas sean las originales si es posible
                         map_current_name_to_original_question_fallback = {}
                         for original_q_name, current_df_proc_name in original_to_simplified_map_for_labels.items():
                             if current_df_proc_name in df_processed.columns:
@@ -465,86 +438,129 @@ if uploaded_file is not None:
                                 break
                         spss_variable_labels_dict[current_col_name_in_df_proc] = str(original_question)[:256]
 
-                # --- MODIFICADO --- Lógica de codificación para usar la nueva función y flags
-                if do_encode_categorical:
-                    st.session_state.log_messages.append("\n--- Iniciando Codificación de Variables Categóricas ---")
+
+                if do_encode_ordinal:
+                    st.session_state.log_messages.append("\n--- Iniciando Codificación de Variables Ordinales ---")
                     if openai_client:
-                        columnas_a_evaluar = list(df_processed.columns) 
+                        columnas_a_evaluar_para_ordinal = list(df_processed.columns) 
                         cols_to_encode_spinner = st.empty()
 
-                        for i, col_actual_en_df_proc in enumerate(columnas_a_evaluar):
-                            cols_to_encode_spinner.info(f"Evaluando columna para codificación: '{col_actual_en_df_proc}' ({i+1}/{len(columnas_a_evaluar)})")
+                        for i, col_actual_en_df_proc in enumerate(columnas_a_evaluar_para_ordinal):
+                            cols_to_encode_spinner.info(f"Evaluando columna para codificación ordinal: '{col_actual_en_df_proc}' ({i+1}/{len(columnas_a_evaluar_para_ordinal)})")
                             st.session_state.log_messages.append(f"\nProcesando columna para codificación: '{col_actual_en_df_proc}'")
 
-                            nombre_col_df_original = next((orig for orig, simpl in original_to_simplified_map_for_labels.items() if simpl == col_actual_en_df_proc), col_actual_en_df_proc)
+                            nombre_col_df_original = None
+                            for orig_name, current_name in original_to_simplified_map_for_labels.items():
+                                if current_name == col_actual_en_df_proc:
+                                    nombre_col_df_original = orig_name
+                                    break
+                            if not nombre_col_df_original and col_actual_en_df_proc in df_original.columns: 
+                                nombre_col_df_original = col_actual_en_df_proc
                             
-                            if nombre_col_df_original not in df_original.columns:
+                            if not nombre_col_df_original or nombre_col_df_original not in df_original.columns:
                                 st.session_state.log_messages.append(f"  Advertencia: No se pudo encontrar la columna original para '{col_actual_en_df_proc}'. Omitiendo.")
                                 continue
                             
+                            # MODIFICACIÓN 1: Comprobación de tipo de datos numéricos
                             if pd.api.types.is_numeric_dtype(df_original[nombre_col_df_original].dtype):
-                                st.session_state.log_messages.append(f"  Omitiendo '{col_actual_en_df_proc}': Ya es de tipo numérico ({df_original[nombre_col_df_original].dtype}).")
+                                st.session_state.log_messages.append(f"  Omitiendo '{col_actual_en_df_proc}' (original: '{nombre_col_df_original}'): Es de tipo numérico ({df_original[nombre_col_df_original].dtype}).")
                                 continue
                             
                             try:
-                                categorias_unicas_series = df_original[nombre_col_df_original].dropna().astype(str).str.strip()
+                                # Convertir a string explícitamente para obtener categorías
+                                categorias_unicas_series = df_original[nombre_col_df_original].dropna().astype(str)
+                                # Reemplazar strings vacíos con 'nan' antes de unique() para que LLM lo vea
                                 categorias_unicas_series = categorias_unicas_series.replace('', 'nan')
                                 categorias_unicas = sorted(list(categorias_unicas_series.unique()))
                             except Exception as e:
-                                st.session_state.log_messages.append(f"  Error al obtener categorías únicas de '{nombre_col_df_original}': {e}. Omitiendo.")
+                                st.session_state.log_messages.append(f"  Error al obtener categorías únicas de '{nombre_col_df_original}' para '{col_actual_en_df_proc}': {e}. Omitiendo.")
                                 continue
                             
                             if not categorias_unicas or not (1 < len(categorias_unicas) <= MAX_CATEGORIAS_PARA_LLM):
-                                st.session_state.log_messages.append(f"  Omitiendo '{col_actual_en_df_proc}': {len(categorias_unicas)} categorías (fuera del límite 1-{MAX_CATEGORIAS_PARA_LLM}).")
+                                if not categorias_unicas: st.session_state.log_messages.append(f"  Omitiendo '{col_actual_en_df_proc}': Sin categorías procesables.")
+                                else: st.session_state.log_messages.append(f"  Omitiendo '{col_actual_en_df_proc}': {len(categorias_unicas)} categorías (límite 1-{MAX_CATEGORIAS_PARA_LLM}).")
                                 continue
 
-                            clave_cache = tuple(categorias_unicas)
-                            sugerencia = st.session_state.codificaciones_cache.get(clave_cache)
+                            clave_cache = tuple(categorias_unicas) # Usar tuple para que sea hasheable
+                            sugerencia = st.session_state.codificaciones_ordinales_cache.get(clave_cache)
                             if not sugerencia:
-                                st.session_state.log_messages.append(f"  Consultando LLM para categorías: {clave_cache}.")
+                                st.session_state.log_messages.append(f"  Consultando LLM para categorías de '{col_actual_en_df_proc}': {clave_cache}.")
                                 with st.spinner(f"Consultando LLM para '{col_actual_en_df_proc}'..."):
-                                     sugerencia = get_llm_categorical_encoding_suggestion(categorias_unicas, client=openai_client)
-                                if sugerencia: st.session_state.codificaciones_cache[clave_cache] = sugerencia
+                                     sugerencia = get_llm_mapping_suggestion(categorias_unicas, client=openai_client)
+                                if sugerencia: st.session_state.codificaciones_ordinales_cache[clave_cache] = sugerencia
                             else:
-                                st.session_state.log_messages.append(f"  Usando codificación guardada (caché) para estas categorías.")
+                                st.session_state.log_messages.append(f"  Usando codificación guardada para categorías de '{col_actual_en_df_proc}'.")
 
-                            if sugerencia and sugerencia.get("needs_encoding") and isinstance(sugerencia.get("mapping_dict"), dict):
-                                mapeo_texto_a_numero = {str(k): int(v) for k, v in sugerencia["mapping_dict"].items()}
-                                etiquetas_valor_spss = {int(v): str(k)[:120] for k, v in sugerencia["mapping_dict"].items()}
+                            if sugerencia and sugerencia.get("is_ordinal") and isinstance(sugerencia.get("mapping_dict"), dict):
+                                mapeo_texto_a_numero = {}
+                                etiquetas_valor_spss_para_esta_col = {}
+                                for k_texto, v_numero in sugerencia["mapping_dict"].items():
+                                    try:
+                                        val_num = int(v_numero) # Asegurar que es int
+                                        mapeo_texto_a_numero[str(k_texto)] = val_num
+                                        etiquetas_valor_spss_para_esta_col[val_num] = str(k_texto)[:120] # Límite SPSS
+                                    except (ValueError, TypeError):
+                                        st.session_state.log_messages.append(f"    Advertencia: Valor no numérico o nulo '{v_numero}' para '{k_texto}' en '{col_actual_en_df_proc}'. Omitiendo esta categoría del mapeo.")
                                 
-                                st.session_state.log_messages.append(f"  Codificación aplicada a '{col_actual_en_df_proc}'. Mapeo: {mapeo_texto_a_numero}")
+                                if not mapeo_texto_a_numero:
+                                    st.session_state.log_messages.append(f"  No se generó un mapeo válido para '{col_actual_en_df_proc}' después de procesar sugerencia LLM.")
+                                    continue
 
-                                source_column_for_mapping = df_original[nombre_col_df_original].astype(str).str.strip().replace('', 'nan')
-                                
-                                if encoding_mode == "Crear nuevas columnas (ej. VarName_num)":
+                                columna_destino_spss_name = ""
+                                # Mapear usando la columna original de df_original (convertida a str)
+                                # y asignar a la columna correspondiente en df_processed.
+                                source_column_for_mapping = df_original[nombre_col_df_original].astype(str).replace('', 'nan')
+
+
+                                if ordinal_encoding_mode == "Crear nuevas columnas (ej. VarName_num)":
                                     columna_destino_spss_name = f"{col_actual_en_df_proc}_num"
-                                    # Asegurar unicidad del nuevo nombre de columna
+                                    temp_dest_name = columna_destino_spss_name
                                     cnt = 1
-                                    while columna_destino_spss_name in df_processed.columns:
-                                        columna_destino_spss_name = f"{col_actual_en_df_proc}_num{cnt}"
+                                    while temp_dest_name in df_processed.columns:
+                                        temp_dest_name = f"{col_actual_en_df_proc}_num{cnt}"
                                         cnt+=1
+                                    columna_destino_spss_name = temp_dest_name
                                     
                                     df_processed[columna_destino_spss_name] = source_column_for_mapping.map(mapeo_texto_a_numero)
                                     original_var_label = spss_variable_labels_dict.get(col_actual_en_df_proc, col_actual_en_df_proc)
-                                    spss_variable_labels_dict[columna_destino_spss_name] = f"{original_var_label} (Codificada)"[:256]
+                                    spss_variable_labels_dict[columna_destino_spss_name] = f"{original_var_label} (Numérico)"[:256]
                                     st.session_state.log_messages.append(f"  Columna '{nombre_col_df_original}' mapeada a NUEVA '{columna_destino_spss_name}'.")
-                                else: # Reemplazar
+                                else: 
                                     columna_destino_spss_name = col_actual_en_df_proc 
                                     df_processed[columna_destino_spss_name] = source_column_for_mapping.map(mapeo_texto_a_numero)
                                     st.session_state.log_messages.append(f"  Valores en '{columna_destino_spss_name}' REEMPLAZADOS con codificación numérica.")
                                 
-                                spss_value_labels_dict[columna_destino_spss_name] = etiquetas_valor_spss
-                                df_processed[columna_destino_spss_name] = pd.to_numeric(df_processed[columna_destino_spss_name], errors='coerce').astype(pd.Int64Dtype())
+                                spss_value_labels_dict[columna_destino_spss_name] = etiquetas_valor_spss_para_esta_col
                                 
+                                try:
+                                    df_processed[columna_destino_spss_name] = pd.to_numeric(df_processed[columna_destino_spss_name], errors='coerce').astype(pd.Int64Dtype())
+                                except Exception: 
+                                    df_processed[columna_destino_spss_name] = pd.to_numeric(df_processed[columna_destino_spss_name], errors='coerce').astype(float)
+                                
+                                # Log de valores no mapeados
+                                unmapped_count = df_processed[columna_destino_spss_name].isnull().sum()
+                                original_non_null = source_column_for_mapping.notnull().sum()
+                                if unmapped_count > 0:
+                                     # Contar cuántos de los NaN en la columna procesada eran originalmente no-NaN en la source_column_for_mapping (después de .astype(str).replace('', 'nan'))
+                                    actually_unmapped_count = source_column_for_mapping[df_processed[columna_destino_spss_name].isnull()].notnull().sum()
+                                    if actually_unmapped_count > 0:
+                                        st.session_state.log_messages.append(f"    Advertencia: {actually_unmapped_count} valores de '{nombre_col_df_original}' no se mapearon a números en '{columna_destino_spss_name}' (ahora son NaN).")
+
+
                             else: 
-                                st.session_state.log_messages.append(f"  LLM (o caché) determinó que '{col_actual_en_df_proc}' no requiere codificación especial.")
+                                if sugerencia and not sugerencia.get("is_ordinal"):
+                                    st.session_state.log_messages.append(f"  LLM (o caché) determinó que '{col_actual_en_df_proc}' no es ordinal.")
+                                elif sugerencia and not isinstance(sugerencia.get("mapping_dict"), dict) :
+                                     st.session_state.log_messages.append(f"  LLM (o caché) no generó un diccionario de mapeo válido para '{col_actual_en_df_proc}'.")
+                                else: # sugerencia es None
+                                     st.session_state.log_messages.append(f"  No se obtuvo sugerencia del LLM (o caché) para '{col_actual_en_df_proc}'.")
 
                         cols_to_encode_spinner.empty()
                     else: 
-                        st.session_state.log_messages.append("Cliente OpenAI no configurado. No se realizará codificación.")
-                    st.session_state.log_messages.append("--- Fin de Codificación Categórica ---")
+                        st.session_state.log_messages.append("Cliente OpenAI no configurado. No se realizará codificación ordinal.")
+                    st.session_state.log_messages.append("--- Fin de Codificación Ordinal ---")
                 else:
-                    st.session_state.log_messages.append("\nCodificación categórica omitida por el usuario.")
+                    st.session_state.log_messages.append("\nCodificación ordinal omitida por el usuario.")
 
 
                 st.session_state.df_processed = df_processed
@@ -562,7 +578,6 @@ if uploaded_file is not None:
         st.session_state.log_messages.append(f"ERROR FATAL: {e}")
 
 
-# --- Sección de Descarga (sin cambios necesarios en su lógica principal) ---
 if st.session_state.df_processed is not None:
     st.subheader("Vista Previa del DataFrame Procesado (antes de sanitización final para .sav)")
     st.dataframe(st.session_state.df_processed.head())
@@ -571,6 +586,7 @@ if st.session_state.df_processed is not None:
     try:
         df_to_write = st.session_state.df_processed.copy()
         
+        # Log para sanitización final
         sanitization_log_messages = ["\n--- Iniciando Sanitización Final y Preparación para .sav ---"]
 
         current_col_names_before_final_sanitize = list(df_to_write.columns)
@@ -607,55 +623,73 @@ if st.session_state.df_processed is not None:
         df_to_write.columns = final_sav_column_names 
         sanitization_log_messages.append("Nombres de columna finales aplicados a df_to_write.")
         
-        column_labels_list_for_sav = [final_spss_variable_labels_for_sav.get(final_col_name, str(final_col_name)[:256]) for final_col_name in df_to_write.columns]
+        column_labels_list_for_sav = []
+        for final_col_name in df_to_write.columns:
+            column_labels_list_for_sav.append(final_spss_variable_labels_for_sav.get(final_col_name, str(final_col_name)[:256]))
         
+        # Limpieza de tipos de datos y MODIFICACIÓN 2: missing_ranges para strings
         spss_missing_ranges = {}
         for col in df_to_write.columns:
+            # Intentar convertir a numérico si es objeto y parece numérico
             if df_to_write[col].dtype == 'object':
                 try:
+                    # Chequear si todos los no-nulos pueden ser numéricos
+                    is_potentially_numeric = True
+                    # Convertir a string para la comprobación, luego intentar numérico
+                    temp_series_str = df_to_write[col].astype(str)
+                    # Si después de convertir a string, alguno no es 'nan' y no puede ser numérico, no es numérico.
+                    # Esto es un poco complicado porque pd.to_numeric puede convertir 'nan' a np.nan.
+                    # Primero, intentemos pd.to_numeric con errors='coerce'
                     numeric_series = pd.to_numeric(df_to_write[col], errors='coerce')
-                    if not numeric_series.isnull().all():
+                    if not numeric_series.isnull().all(): # Si hay algún valor numérico
+                         # Comprobar si los valores originales que se convirtieron a NaN eran realmente strings no numéricos
                         original_values_that_became_nan = df_to_write[col][numeric_series.isnull()]
-                        is_potentially_numeric = all(pd.isna(x) or (isinstance(x, str) and x.lower() in ('nan', '')) for x in original_values_that_became_nan)
-                        
-                        if is_potentially_numeric:
-                            df_to_write[col] = numeric_series
-                            sanitization_log_messages.append(f"  Columna '{col}' convertida a tipo numérico.")
-                        else:
-                            df_to_write[col] = df_to_write[col].astype(str)
-                            spss_missing_ranges[col] = ['nan']
-                            sanitization_log_messages.append(f"  Columna '{col}' tratada como string. Missing range ['nan'] aplicado.")
-                    else:
-                        df_to_write[col] = df_to_write[col].astype(str)
-                        spss_missing_ranges[col] = ['nan']
-                        sanitization_log_messages.append(f"  Columna '{col}' (todo NaN o no numérico) tratada como string. Missing range ['nan'] aplicado.")
+                        # Si alguno de estos era un string no numérico (y no NaN/None original), entonces no era puramente numérico
+                        if not all(pd.isna(x) or (isinstance(x, str) and x.lower() == 'nan') for x in original_values_that_became_nan):
+                            is_potentially_numeric = False # Contiene strings que no son 'nan' y no son numéricos
+                    
+                    if is_potentially_numeric and not numeric_series.isnull().all(): # Si es numérico y no todo NaN
+                        df_to_write[col] = numeric_series
+                        sanitization_log_messages.append(f"  Columna '{col}' convertida a tipo numérico.")
+                    else: # No se pudo convertir completamente a numérico o es todo NaN
+                        df_to_write[col] = df_to_write[col].astype(str) # Convertir a string si no
+                        spss_missing_ranges[col] = ['nan'] # Aplicar missing range para strings
+                        sanitization_log_messages.append(f"  Columna '{col}' tratada como string. Missing range ['nan'] aplicado.")
 
-                except (ValueError, TypeError): 
-                    df_to_write[col] = df_to_write[col].astype(str)
+                except ValueError: 
+                    df_to_write[col] = df_to_write[col].astype(str) # Convertir a string si falla
                     spss_missing_ranges[col] = ['nan'] 
-                    sanitization_log_messages.append(f"  Columna '{col}' (error en conversión) tratada como string. Missing range ['nan'] aplicado.")
+                    sanitization_log_messages.append(f"  Columna '{col}' (error en conversión numérica) tratada como string. Missing range ['nan'] aplicado.")
             
+            # Si ya es un tipo string explícito (ej. pd.StringDtype)
             elif pd.api.types.is_string_dtype(df_to_write[col].dtype):
                 spss_missing_ranges[col] = ['nan']
                 sanitization_log_messages.append(f"  Columna '{col}' (tipo string) con missing range ['nan'] aplicado.")
             
+            # Para tipos numéricos, pyreadstat maneja NaN como system missing por defecto.
             elif pd.api.types.is_numeric_dtype(df_to_write[col].dtype):
                  sanitization_log_messages.append(f"  Columna '{col}' es numérica. NaN se tratará como system missing.")
 
+
         sanitization_log_messages.append("--- Fin de Sanitización Final y Preparación ---")
+        
+        # Añadir logs de sanitización a los logs generales
         st.session_state.log_messages.extend(sanitization_log_messages)
+        # Mostrar logs actualizados
         st.subheader("Log del Proceso (incluye sanitización final)")
         st.text_area("Mensajes (actualizado con sanitización final):", "\n".join(st.session_state.log_messages), height=200)
+
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".sav") as tmp_file:
             temp_file_path = tmp_file.name
         
+    
         pyreadstat.write_sav(
             df_to_write, 
             temp_file_path, 
             column_labels=column_labels_list_for_sav, 
             variable_value_labels=final_spss_value_labels_for_sav,
-            missing_ranges=spss_missing_ranges
+            missing_ranges=spss_missing_ranges # MODIFICACIÓN 2: Pasar los missing ranges
         )
 
         with open(temp_file_path, "rb") as f:
@@ -677,6 +711,7 @@ if st.session_state.df_processed is not None:
         st.error(f"Error al generar el archivo .sav: {e}")
         st.exception(e)
         st.session_state.log_messages.append(f"ERROR FATAL DURANTE GENERACIÓN .SAV: {e}")
+        # Mostrar logs actualizados con el error
         st.subheader("Log del Proceso (con error en .sav)")
         st.text_area("Mensajes (actualizado con error):", "\n".join(st.session_state.log_messages), height=200)
 
